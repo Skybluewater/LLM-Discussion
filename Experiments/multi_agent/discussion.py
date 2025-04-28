@@ -50,7 +50,10 @@ class LLM_Debate(Discussion):
         agents = []
         for config in agents_config:
             if config['type'] == 'openai':
-                agents.append(OpenAIAgent(model_name=config['model_name'], 
+                model_name = 'Qwen/QwQ-32B-Preview'
+                agents.append(OpenAIAgent(
+                    # model_name=config['model_name'], 
+                                          model_name=model_name,
                                           agent_name = config['agent_name'], 
                                           agent_role = config['agent_role'], 
                                           agent_speciality = config['agent_speciality'], 

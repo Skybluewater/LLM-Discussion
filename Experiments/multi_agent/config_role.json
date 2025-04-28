@@ -1,7 +1,7 @@
 [
     {
         "type": "openai",
-        "model_name": "gpt-3.5-turbo-0125",
+        "model_name": "Qwen/QwQ-32B-Preview",
         "agent_name": "GPT Agent 6 - Environmentalist",
         "agent_role": "Environmentalist",
         "agent_speciality": "Sustainability and Environmental Health",
@@ -10,7 +10,7 @@
     },
     {
       "type": "openai",
-      "model_name": "gpt-3.5-turbo-0125",
+      "model_name": "Qwen/QwQ-32B-Preview",
       "agent_name": "GPT Agent 4 - Creative Professional",
       "agent_role": "Creative Professional",
       "agent_speciality": "Aesthetics, Narratives, and Emotions",
@@ -19,7 +19,7 @@
     },
     {
       "type": "openai",
-      "model_name": "gpt-3.5-turbo-0125",
+      "model_name": "Qwen/QwQ-32B-Preview",
       "agent_name": "GPT Agent 10-1 - Futurist",
       "agent_role": "Futurist",
       "agent_speciality": "Emerging Technologies and Future Scenarios",
@@ -28,7 +28,7 @@
     },
     {
       "type": "openai",
-      "model_name": "gpt-3.5-turbo-0125",
+      "model_name": "Qwen/QwQ-32B-Preview",
       "agent_name": "GPT Agent 10-2 - Futurist",
       "agent_role": "Futurist",
       "agent_speciality": "Emerging Technologies and Future Scenarios",

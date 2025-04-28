@@ -55,7 +55,10 @@ class Agent:
 class OpenAIAgent(Agent):
     def __init__(self, model_name, agent_name, agent_role, agent_speciality, agent_role_prompt, speaking_rate, missing_history = []):
         self.model_name = model_name
-        self.client = OpenAI()
+        self.client = OpenAI(
+            api_key=os.getenv("DASHSCOPE_API_KEY"), 
+            base_url="https://dashscope.aliyuncs.com/compatible-mode/v1"
+        )
         self.agent_name = agent_name
         self.agent_role = agent_role
         self.agent_speciality = agent_speciality
