@@ -4,6 +4,7 @@ import logging
 import subprocess
 import time
 import pickle
+import re
 
 from typing import Dict, Any, List
 
@@ -57,6 +58,22 @@ class OpenAIAgent(Agent):
     def construct_user_message(self, content):
         return {"role": "user", "content": content}
 
+    @staticmethod
+    def extract_json(str):
+        try:
+            # Attempt to parse the string as JSON
+            str = str.replace("'", "\"")
+            pattern = re.compile(r'(\{.*\})', re.DOTALL)
+            match = pattern.search(str)
+            if match:
+                filtered = match.group(1)
+                json_data = json.loads(filtered)
+            return json_data
+        except json.JSONDecodeError:
+            # If parsing fails, return None or handle the error as needed
+            logging.error(f"Failed to parse JSON: {str}")
+            return None
+
 class SubTask():
     def __init__(self, task_name, core_goal):
         self.task_name = task_name
@@ -90,16 +107,19 @@ class SubTask():
         prefix_string += "\n以下是来自其他团队成员的设计:\n"
         recommend_list = []
         recommend_prompt = ""
+        query = ""
         for agent_role, responses in most_recent_responses.items():
+            content = OpenAIAgent.extract_json(responses[-1]["content"])
             if agent_role != current_agent:
-                content = json.loads(responses[-1]["content"].replace("'", "\""))
                 design = content.get("设计", {})
                 recommend = content.get("建议", {})
                 if len(recommend) > 0:
                     for key, value in recommend.items():
-                        if key.split("_")[0] == current_agent:
-                            recommend_list.append(f"来自 {agent_role} 对你的建议：\n 建议: {value["优化建议"]}\n 原因: {value["优化原因"]}\n")
+                        if key.split("-")[0].strip() == current_agent:
+                            recommend_list.append(f"来自 {agent_role} 对你在 {key.split("-")[1].strip()} 设计上的建议：\n 建议: {value["意见"]}\n 原因: {value["原因"]}\n")
                 prefix_string += f"团队成员 {agent_role} 的设计: {design}\n"
+            else:
+                query = content.get("检索内容", self.task_name)
         if len(recommend_list) > 0:
             recommend_prompt = "以及他人对你的建议"
             prefix_string += "\n以下是来自其他团队成员对你的建议:\n"
@@ -123,16 +143,16 @@ class SubTask():
         "选择理由": 你的简短选择理由
     },
     "舞台元素": {
-        "设计选择": [],
-        "选择理由": []
+        "设计选择": ...,
+        "选择理由": ...
     },
     "灯光元素": {
-        "设计选择": [],
-        "选择理由": []
+        "设计选择": ...,
+        "选择理由": ...
     },
     "道具元素": {
-        "设计选择": [],
-        "选择理由": []
+        "设计选择": ...,
+        "选择理由": ...
     }
 }
 """
@@ -172,7 +192,7 @@ class SubTask():
         for agent in self.agent_roles:
             final_msg = most_recent_responses[agent.agent_role][-1]["content"]
             try:
-                final_vote = json.loads(final_msg)
+                final_vote = OpenAIAgent.extract_json(final_msg)
             except Exception as e:
                 logging.error(f"Error parsing JSON from {agent.agent_role}: {e}")
                 continue
@@ -198,7 +218,7 @@ class SubTask():
             for best_role in best_roles:
                 for agent in self.agent_roles:
                     if agent.agent_role == best_role:
-                        final_content = most_recent_responses[agent.agent_role][-3]["content"].replace("'", "\"")
+                        final_content = OpenAIAgent.extract_json(most_recent_responses[agent.agent_role][-3]["content"].replace("'", "\""))
                         try:
                             final_json = json.loads(final_content)
                             # Try to fetch a detailed design field; fallback to the entire component design if not specified.
@@ -292,7 +312,7 @@ class TotalTask:
 if __name__ == "__main__":
     total = TotalTask(
         task_text="以大熊猫为主题为成都2025世界运动会设计一开场节目",
-        model_name="qwen-turbo-2025-04-28",
+        model_name="qwen-plus-2025-04-28"#"qwen3-30b-a3b"#"qwen2.5-14b-instruct-1m"#"qwen-turbo-2025-04-28",#"qwen2.5-14b-instruct-1m",#"",
     )
     total.save_structured(
         "total_task.json",
