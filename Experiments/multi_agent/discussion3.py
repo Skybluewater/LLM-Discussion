@@ -100,7 +100,7 @@ class SubTask():
             speaking_rate=speaking_rate
         ))
     
-    def construct_response(self, is_last_round, current_agent, most_recent_responses):
+    def construct_response(self, is_last_round, current_agent: OpenAIAgent, most_recent_responses):
         prefix_string = "你所在的子任务小组目前正在讨论任务的实施方案，你现在在和其他团队成员积极讨论。请尽己所能给出有价值的观点和创新性的想法。"
         if len(most_recent_responses) == 0:
             return prefix_string
@@ -108,25 +108,33 @@ class SubTask():
         recommend_list = []
         recommend_prompt = ""
         query = ""
+        query_retrieved = ""
+        query_prompt = ""
         for agent_role, responses in most_recent_responses.items():
             content = OpenAIAgent.extract_json(responses[-1]["content"])
-            if agent_role != current_agent:
+            if agent_role != current_agent.agent_role:
                 design = content.get("设计", {})
                 recommend = content.get("建议", {})
                 if len(recommend) > 0:
                     for key, value in recommend.items():
-                        if key.split("-")[0].strip() == current_agent:
+                        if key.split("-")[0].strip() == current_agent.agent_role:
                             recommend_list.append(f"来自 {agent_role} 对你在 {key.split("-")[1].strip()} 设计上的建议：\n 建议: {value["意见"]}\n 原因: {value["原因"]}\n")
                 prefix_string += f"团队成员 {agent_role} 的设计: {design}\n"
             else:
                 query = content.get("检索内容", self.task_name)
+        if len(query) > 0:
+            context = current_agent.construct_user_message(f"请根据以下内容进行检索: {query}")
+            query_retrieved = current_agent.generate_answer(context)
         if len(recommend_list) > 0:
             recommend_prompt = "以及他人对你的建议"
             prefix_string += "\n以下是来自其他团队成员对你的建议:\n"
             prefix_string += "\n".join(recommend_list) + "\n"
+        if len(query_retrieved) > 0:
+            prefix_string += f"\n同时对于你刚才的提问 {query}, 以下是来自知识库的检索结果:\n{query_retrieved}\n 希望对你充分理解任务需求并设计出最优的方案有所帮助。\n"
+            query_prompt = "以及你从知识库检索获得的相关内容"
         if not is_last_round:
             prefix_string += f"""
-根据以上内容，请你结合他人设计中的亮点{recommend_prompt}，优化你的观点。
+根据以上内容，请你结合他人设计中的亮点{recommend_prompt}{query_prompt}，优化你的观点。
 同时请从你的专业角度对其他人的观点选择支持、反对或提出不同的看法，并用简短明确的语言指出其他团队成员观点中的不足之处或可改进的地方。
 
 请注意保持讨论过程的友好和建设性，同时在针对其他人的观点时请在开头部分明确指出提出这个观点的对象，以提升讨论的针对性。
@@ -175,7 +183,7 @@ class SubTask():
             for agent in self.agent_roles:
                 response_from_others = self.construct_response(
                     is_last_round=is_last,
-                    current_agent=agent.agent_role,
+                    current_agent=agent,
                     most_recent_responses=most_recent_responses
                 )
                 # build per-agent prompt
