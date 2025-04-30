@@ -2,9 +2,11 @@ import json
 import os
 import logging
 import subprocess
+import copy
 import time
 import pickle
 import re
+import concurrent.futures
 
 from typing import Dict, Any, List, Union
 
@@ -113,8 +115,11 @@ class SubTask():
         query_retrieved = ""
         query_prompt = ""
         current_design = {}
+        most_recent_responses = copy.deepcopy(most_recent_responses)
         for agent_role, responses in most_recent_responses.items():
             content = OpenAIAgent.extract_json(responses[-1]["content"])
+            if content is None:
+                continue
             if agent_role != current_agent.agent_role:
                 design = content.get("设计", {})
                 recommend = content.get("建议", {})
@@ -131,7 +136,7 @@ class SubTask():
         if is_last_round:
             prefix_string += f"团队成员(你) {current_agent.agent_role} 的设计: {current_design}\n"
         if len(query) > 0:
-            context = current_agent.construct_user_message(f"请根据以下内容进行检索: {query}")
+            context = [current_agent.construct_user_message(f"请根据以下内容进行检索: {query}")]
             query_retrieved = current_agent.generate_answer(context)
         if len(recommend_list) > 0:
             recommend_prompt = "以及他人对你的建议"
@@ -152,23 +157,23 @@ class SubTask():
             prefix_string += """
 你们的讨论时间即将结束，请根据以上内容，从包括你的设计在内的所有人的设计中，请组合选择出你认为最优的一套方案，并给出你的简要选择理由。
 
-你的输出格式应如下所示。
+你的输出格式应如下 Json 格式所示。
 {
     "演员元素": {
-        "设计选择": 你认为最优的团队成员名称(如舞蹈专家,当你选择自身设计时,给出你的角色名称),
-        "选择理由": 你的简短选择理由
+        "设计选择": "你认为最优的团队成员名称(如舞蹈专家,当你选择自身设计时,给出你的角色名称)",
+        "选择理由": "你的简短选择理由"
     },
     "舞台元素": {
-        "设计选择": ...,
-        "选择理由": ...
+        "设计选择": "...",
+        "选择理由": "..."
     },
     "灯光元素": {
-        "设计选择": ...,
-        "选择理由": ...
+        "设计选择": "...",
+        "选择理由": "..."
     },
     "道具元素": {
-        "设计选择": ...,
-        "选择理由": ...
+        "设计选择": "...",
+        "选择理由": "..."
     }
 }
 """
@@ -179,8 +184,6 @@ class SubTask():
         rounds: number of debate rounds
         prompt_template supports placeholders:
           {agent_role_prompt}, {subtask_name}, {subtask_core_goal}, {round}, {is_last_round}
-        """
-        tool_call_prompt = """
         """
         print(f"Running subtask: {self.task_name} with {len(self.agent_roles)} agents")
         chat_history = {agent.agent_role: [] for agent in self.agent_roles}
@@ -248,9 +251,8 @@ class SubTask():
                     if agent.agent_role == best_role:
                         final_content = OpenAIAgent.extract_json(most_recent_responses[agent.agent_role][-3]["content"].replace("'", "\""))
                         try:
-                            final_json = json.loads(final_content)
                             # Try to fetch a detailed design field; fallback to the entire component design if not specified.
-                            design_detail = final_json.get("设计").get(component)
+                            design_detail = final_content.get("设计").get(component)
                             # If design_detail is a dict, further extract component details if available.
                             if isinstance(design_detail, dict): # and component in design_detail:
                                 design_details.append(design_detail)
@@ -259,6 +261,9 @@ class SubTask():
                             logging.error(f"Error extracting detailed design from agent {agent.agent_role}: {e}")
                         break
             if len(design_details) == 1:
+                design_details = design_details[0]
+            elif len(design_details) > 2:
+                # design_details = design_details[:2]
                 design_details = design_details[0]
             best_designs[component] = design_details
         print(f"Best designs for {self.task_name}: {best_designs}")
@@ -340,7 +345,7 @@ class TotalTask:
             raise ValueError(f"Unsupported format: {fmt}")
     
     def fetch_best_answer(self, generation: Dict, subtask_designs: Dict):
-        best_design_ch = generation["最佳设计组合"]
+        best_design_ch = generation["最优设计组合"]
         combest_design: Dict[str, Dict] = {}
         for component, info in best_design_ch.items():
             subtask_choice = info["设计选择"]
@@ -358,43 +363,54 @@ class TotalTask:
         """
         print(f"Running total task: {self.task_core_goal} with {len(self.subtasks)} subtasks")
         # 1) run the pipeline to get structured task, subtasks and roles
+        final_best_design = {}
         for i in range(iters):
             response_from_other_subtasks = ""
             results = {}
             designs = {}
-            for st in self.subtasks:
-                history, best_design = st.run(rounds, self.prompt, None if i == 0 else response_from_other_subtasks)
-                
-                results[st.task_name] = history
-                designs[st.task_name] = best_design
-                response_from_other_subtasks += f"\n子任务小组 {st.task_name} : {best_design}\n"
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=len(self.subtasks)) as executor:
+                future_to_subtask = {
+                    executor.submit(
+                        st.run,
+                        rounds,
+                        self.prompt,
+                        None if i == 0 else response_from_other_subtasks
+                    ): st.task_name for st in self.subtasks
+                }
+                for future in concurrent.futures.as_completed(future_to_subtask):
+                    task_name = future_to_subtask[future]
+                    history, best_design = future.result()
+                    results.setdefault(task_name, []).append(history)
+                    designs[task_name] = best_design
+                    response_from_other_subtasks += f"\n子任务小组 {task_name} : {best_design}\n"
+            
             head_agent_subtask_prompt = prompts["head_agent_subtask"].replace("{subtasks}", self.sub_task_prompt)
             head_agent_task = prompts["head_agent_task"].replace("{discussion_results}", response_from_other_subtasks)
             prompt = prompts["head_agent_role"] + self.prompt + head_agent_subtask_prompt + head_agent_task
-            context = self.agent.construct_user_message(prompt)
+            context = [self.agent.construct_user_message(prompt)]
             generation = OpenAIAgent.extract_json(self.agent.generate_answer(context))
             # get the best answer from all subtasks returns
             total_best_answer = self.fetch_best_answer(generation=generation, subtask_designs=designs)
             # save the best answer to use for next turn discussion
             response_from_other_subtasks = str(total_best_answer)
+            final_best_design = total_best_answer
             print(f"Best designs for {self.task_core_goal} in iter{i + 1}: {total_best_answer}")
 
-        return results
+        return results, final_best_design
 
 if __name__ == "__main__":
     total = TotalTask(
         task_text="以大熊猫为主题为成都2025世界运动会设计一开场节目",
-        model_name="qwen-plus-2025-04-28"#"qwen3-30b-a3b"#"qwen2.5-14b-instruct-1m"#"qwen-turbo-2025-04-28",#"qwen2.5-14b-instruct-1m",#"",
+        model_name="qwen-plus-2025-04-28"#"qwen3-30b-a3b"#"qwen2.5-14b-instruct-1m"#"qwen-turbo-2025-04-28",#"qwen2.5-14b-instruct-1m",#"","
     )
     total.save_structured(
         "total_task.json",
         fmt="json"
     )
-    total.save_structured(
-        "total_task.pkl",
-        fmt="pickle"
-    )
-    # 运行辩论
-    debate_results = total.run_all(iters=1, rounds=2)
-    print(debate_results)
-    # 保存结构化初始化结果
+    debate_results, best_design = total.run_all(iters=3, rounds=3)
+    with open("debate_results.pkl", "wb") as f:
+        pickle.dump(debate_results, f)
+
+    with open("best_design.pkl", "wb") as f:
+        pickle.dump(best_design, f)
