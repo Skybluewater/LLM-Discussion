@@ -64,7 +64,7 @@ class OpenAIAgent(Agent):
     def extract_json(str):
         try:
             # Attempt to parse the string as JSON
-            str = str.replace("'", "\"")
+            str = str.replace("'", "").replace("json", "").replace("：", ":").replace("，", ",").replace("“", "\"").replace("”", "\"")
             pattern = re.compile(r'(\{.*\})', re.DOTALL)
             match = pattern.search(str)
             if match:
