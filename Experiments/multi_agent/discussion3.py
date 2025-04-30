@@ -100,7 +100,7 @@ class SubTask():
             speaking_rate=speaking_rate
         ))
     
-    def construct_response(self, is_last_round, is_first_round, current_agent: OpenAIAgent, most_recent_responses, optimized_design: None):
+    def construct_response(self, current_agent: OpenAIAgent, is_first_round, is_last_round, most_recent_responses, optimized_design: None):
         prefix_string = "你所在的子任务小组目前正在讨论任务的实施方案，你现在在和其他团队成员积极讨论。请尽己所能给出有价值的观点和创新性的想法。\n"
         if is_first_round:
             if optimized_design is not None:
@@ -120,7 +120,9 @@ class SubTask():
                 recommend = content.get("建议", {})
                 if len(recommend) > 0:
                     for key, value in recommend.items():
-                        if key.split("-")[0].strip() == current_agent.agent_role:
+                        if key == "个人建议":
+                            recommend_list.append(f"来自 {agent_role} 在设计上的建议：\n 建议: {value["意见"]}\n 原因: {value["原因"]}\n")
+                        elif key.split("-")[0].strip() == current_agent.agent_role:
                             recommend_list.append(f"来自 {agent_role} 对你在 {key.split("-")[1].strip()} 设计上的建议：\n 建议: {value["意见"]}\n 原因: {value["原因"]}\n")
                 prefix_string += f"团队成员 {agent_role} 的设计: {design}\n"
             else:
@@ -180,6 +182,7 @@ class SubTask():
         """
         tool_call_prompt = """
         """
+        print(f"Running subtask: {self.task_name} with {len(self.agent_roles)} agents")
         chat_history = {agent.agent_role: [] for agent in self.agent_roles}
         most_recent_responses = {}
         for r in range(rounds + 1):
@@ -188,9 +191,9 @@ class SubTask():
             round_responses = {agent.agent_role: [] for agent in self.agent_roles}
             for agent in self.agent_roles:
                 response_from_others = self.construct_response(
-                    is_last_round=is_last,
-                    is_first=is_first,
                     current_agent=agent,
+                    is_first_round=is_first,
+                    is_last_round=is_last,
                     most_recent_responses=most_recent_responses,
                     optimized_design=response_from_other_subtasks
                 )
@@ -199,6 +202,7 @@ class SubTask():
                 user_msg = agent.construct_user_message(prompt)
                 chat_history[agent.agent_role].append(user_msg)
                 response = agent.generate_answer(chat_history[agent.agent_role])
+                print(f"Agent {agent.agent_role} response: {response[:50]}...")
                 assistant_msg = agent.construct_assistant_message(response)
                 chat_history[agent.agent_role].append(assistant_msg)
                 round_responses[agent.agent_role] = chat_history[agent.agent_role]
@@ -257,6 +261,7 @@ class SubTask():
             if len(design_details) == 1:
                 design_details = design_details[0]
             best_designs[component] = design_details
+        print(f"Best designs for {self.task_name}: {best_designs}")
         return chat_history, best_designs
 
 class TotalTask:
@@ -265,10 +270,10 @@ class TotalTask:
         task_json, subtasks, roles_by_subtask = run_pipeline(task_text)
         self.agent = OpenAIAgent(
             model_name="qwen-plus-2025-04-28",
-            agent_role=None,
-            agent_speciality=None,
-            agent_subtask=None,
-            agent_role_prompt=None,
+            agent_role="大统领",
+            agent_speciality="狠狠压榨",
+            agent_subtask="管喽喽",
+            agent_role_prompt="看我干啥，瞅你咋地",
             speaking_rate=1.0,
         )
         self.task_info = task_json
@@ -298,7 +303,7 @@ class TotalTask:
                     agent_role_prompt=prompts["agent_task"]
                 )
             self.subtasks.append(st)
-        self.sub_task_prompt = ", ".join([_.task_name for _ in subtasks])
+        self.sub_task_prompt = ", ".join([_["任务名称"] for _ in subtasks])
 
     def __str__(self):
         return f"TotalTask with {len(self.subtasks)} subtasks"
@@ -351,6 +356,8 @@ class TotalTask:
         Run debate for each subtask and return a mapping:
           { subtask_name: chat_history }
         """
+        print(f"Running total task: {self.task_core_goal} with {len(self.subtasks)} subtasks")
+        # 1) run the pipeline to get structured task, subtasks and roles
         for i in range(iters):
             response_from_other_subtasks = ""
             results = {}
@@ -368,8 +375,9 @@ class TotalTask:
             generation = OpenAIAgent.extract_json(self.agent.generate_answer(context))
             # get the best answer from all subtasks returns
             total_best_answer = self.fetch_best_answer(generation=generation, subtask_designs=designs)
-
+            # save the best answer to use for next turn discussion
             response_from_other_subtasks = str(total_best_answer)
+            print(f"Best designs for {self.task_core_goal} in iter{i + 1}: {total_best_answer}")
 
         return results
 
