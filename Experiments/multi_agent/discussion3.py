@@ -13,7 +13,7 @@ from typing import Dict, Any, List, Union
 from openai import OpenAI
 from role_init import run_pipeline
 from prompt import prompts
-
+sub_task_to_dps = ""
 class Agent:
     def generate_answer(self, answer_context):
         raise NotImplementedError("This method should be implemented by subclasses.")
@@ -64,7 +64,7 @@ class OpenAIAgent(Agent):
     def extract_json(str):
         try:
             # Attempt to parse the string as JSON
-            str = str.replace("'", "").replace("json", "").replace("：", ":").replace("，", ",").replace("“", "\"").replace("”", "\"")
+            str = str.replace("'", "").replace("json", "").replace("：", ":").replace("，", ",").replace("`", "")
             pattern = re.compile(r'(\{.*\})', re.DOTALL)
             match = pattern.search(str)
             if match:
@@ -136,11 +136,11 @@ class SubTask():
         if is_last_round:
             prefix_string += f"团队成员(你) {current_agent.agent_role} 的设计: {current_design}\n"
         if len(query) > 0:
-            context = [current_agent.construct_user_message(f"请根据以下内容进行检索: {query}")]
+            context = [current_agent.construct_user_message(f"请根据以下内容进行检索: {query}，并用简短的语言以Json格式回答。")]
             query_retrieved = current_agent.generate_answer(context)
         if len(recommend_list) > 0:
             recommend_prompt = "以及他人对你的建议"
-            prefix_string += "\n以下是来自其他团队成员对你的建议:\n"
+            prefix_string += "\n以下是来自其他团队成员对你的建议，你可以选择采纳或不采纳:\n"
             prefix_string += "\n".join(recommend_list) + "\n"
         if len(query_retrieved) > 0:
             prefix_string += f"\n同时对于你刚才的提问 {query}, 以下是来自知识库的检索结果:\n{query_retrieved}\n 希望对你充分理解任务需求并设计出最优的方案有所帮助。\n"
@@ -150,14 +150,15 @@ class SubTask():
 根据以上内容，请你结合他人设计中的亮点{recommend_prompt}{query_prompt}，优化你的观点。
 同时请从你的专业角度对其他人的观点选择支持、反对或提出不同的看法，并用简短明确的语言指出其他团队成员观点中的不足之处或可改进的地方。
 
-请注意保持讨论过程的友好和建设性，同时在针对其他人的观点时请在开头部分明确指出提出这个观点的对象，以提升讨论的针对性。
-同时请记住在讨论中向其他人声明你的角色。请在讨论中保持礼貌。
+请注意保持讨论过程的建设性，讨论应该激烈，以更好激发大家的创造力，同时在针对其他人的观点时请在开头部分明确指出提出这个观点的对象，以提升讨论的针对性。
+并确保用上文中提到的Json格式输出你的观点。并保证输出的完整性。请在讨论中保持礼貌。
 """
         if is_last_round:
             prefix_string += """
 你们的讨论时间即将结束，请根据以上内容，从包括你的设计在内的所有人的设计中，请组合选择出你认为最优的一套方案，并给出你的简要选择理由。
 
-你的输出格式应如下 Json 格式所示。
+你的输出格式应如下 Json 格式所示。请确保你的输出符合该Json格式，并且没有多余的尾随逗号，也不要有额外的换行。同时请务必确保Json的key-value周边的英文引号存在，且在Json外不要添加任何其他信息。
+输出格式：
 {
     "演员元素": {
         "设计选择": "你认为最优的团队成员名称(如舞蹈专家,当你选择自身设计时,给出你的角色名称)",
@@ -175,8 +176,7 @@ class SubTask():
         "设计选择": "...",
         "选择理由": "..."
     }
-}
-"""
+}"""
         return prefix_string
 
     def run(self, rounds: int, higher_prompt: str, response_from_other_subtasks = None):
@@ -205,7 +205,8 @@ class SubTask():
                 user_msg = agent.construct_user_message(prompt)
                 chat_history[agent.agent_role].append(user_msg)
                 response = agent.generate_answer(chat_history[agent.agent_role])
-                print(f"Agent {agent.agent_role} response: {response[:50]}...")
+                if sub_task_to_dps == self.task_name:
+                    print(f"Agent {agent.agent_role} response: {response}...")
                 assistant_msg = agent.construct_assistant_message(response)
                 chat_history[agent.agent_role].append(assistant_msg)
                 round_responses[agent.agent_role] = chat_history[agent.agent_role]
@@ -219,20 +220,24 @@ class SubTask():
             except Exception as e:
                 logging.error(f"Error parsing JSON from {agent.agent_role}: {e}")
                 continue
-            for component, result in final_vote.items():
-                try:
-                    chosen = result.get("设计选择")
-                except Exception as e:
-                    logging.error(f"Error parsing JSON from {agent.agent_role}: {e}")
-                    continue
-                if not chosen:
-                    continue
-                if isinstance(chosen, list):
-                    chosen = chosen[0]
-                if not isinstance(chosen, str):
-                    continue
-                vote_counts.setdefault(component, {})
-                vote_counts[component][chosen] = vote_counts[component].get(chosen, 0) + 1
+            try:
+                for component, result in final_vote.items():
+                    try:
+                        chosen = result.get("设计选择")
+                    except Exception as e:
+                        logging.error(f"Error parsing JSON from {agent.agent_role}: {e}")
+                        continue
+                    if not chosen:
+                        continue
+                    if isinstance(chosen, list):
+                        chosen = chosen[0]
+                    if not isinstance(chosen, str):
+                        continue
+                    vote_counts.setdefault(component, {})
+                    vote_counts[component][chosen] = vote_counts[component].get(chosen, 0) + 1
+            except Exception as e:
+                logging.error(f"Error parsing JSON from {agent.agent_role}: {e}")
+                continue
 
         best_answers = {}
         for component, votes in vote_counts.items():
@@ -274,7 +279,7 @@ class TotalTask:
         # 1) run the pipeline to get structured task, subtasks and roles
         task_json, subtasks, roles_by_subtask = run_pipeline(task_text)
         self.agent = OpenAIAgent(
-            model_name="qwen-plus-2025-04-28",
+            model_name="qwen2.5-vl-32b-instruct",
             agent_role="大统领",
             agent_speciality="狠狠压榨",
             agent_subtask="管喽喽",
@@ -368,7 +373,8 @@ class TotalTask:
             response_from_other_subtasks = ""
             results = {}
             designs = {}
-
+            global sub_task_to_dps
+            sub_task_to_dps = self.subtasks[0].task_name
             with concurrent.futures.ThreadPoolExecutor(max_workers=len(self.subtasks)) as executor:
                 future_to_subtask = {
                     executor.submit(
@@ -392,9 +398,9 @@ class TotalTask:
             generation = OpenAIAgent.extract_json(self.agent.generate_answer(context))
             # get the best answer from all subtasks returns
             total_best_answer = self.fetch_best_answer(generation=generation, subtask_designs=designs)
-            # save the best answer to use for next turn discussion
             response_from_other_subtasks = str(total_best_answer)
             final_best_design = total_best_answer
+            # save the best answer to use for next turn discussion
             print(f"Best designs for {self.task_core_goal} in iter{i + 1}: {total_best_answer}")
 
         return results, final_best_design
@@ -402,15 +408,14 @@ class TotalTask:
 if __name__ == "__main__":
     total = TotalTask(
         task_text="以大熊猫为主题为成都2025世界运动会设计一开场节目",
-        model_name="qwen-plus-2025-04-28"#"qwen3-30b-a3b"#"qwen2.5-14b-instruct-1m"#"qwen-turbo-2025-04-28",#"qwen2.5-14b-instruct-1m",#"","
+        model_name="qwen-plus-2025-04-28"#"qwen2.5-vl-32b-instruct"#"qwen-plus-2025-04-28"#"qwen3-30b-a3b"#"qwen2.5-14b-instruct-1m"#"qwen-turbo-2025-04-28",#,#"","
     )
     total.save_structured(
         "total_task.json",
         fmt="json"
     )
     debate_results, best_design = total.run_all(iters=3, rounds=3)
-    with open("debate_results.pkl", "wb") as f:
+    with open("debate_results_panda.pkl", "wb") as f:
         pickle.dump(debate_results, f)
-
-    with open("best_design.pkl", "wb") as f:
+    with open("best_design_panda.pkl", "wb") as f:
         pickle.dump(best_design, f)
