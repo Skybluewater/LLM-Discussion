@@ -24,7 +24,9 @@ def auto_grade(args):
 
     # OPENAI KEY
     api_key = os.getenv("OPENAI_API_KEY")
-    version = "gpt-4-0125-preview" if args.version == "4" else "gpt-3.5-turbo-0125"
+    api_key = "sk-fkfyvjbzyhnemttsoduishuxodlsbztdcxogakhfnqyiftxf" if api_key is None else api_key
+    # version = "gpt-4-0125-preview" if args.version == "4" else "gpt-3.5-turbo-0125"
+    version = "Qwen/QwQ-32B-Preview"
     print(f"Using GPT Version {version}, Input: {args.version}")
 
     # SETUP CACHE AND MODEL

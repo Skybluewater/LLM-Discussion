@@ -44,7 +44,7 @@ def run_pipeline(question: str):
         ret = call_llm(role_prompt)
         roles = json.loads(ret)
         roles_by_subtask[task_name] = roles
-    return roles_by_subtask
+    return task_json, subtasks, roles_by_subtask
 
 # 3. CLI entrypoint
 if __name__ == "__main__":

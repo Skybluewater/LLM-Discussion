@@ -6,7 +6,7 @@ import time
 import pickle
 import re
 
-from typing import Dict, Any, List
+from typing import Dict, Any, List, Union
 
 from openai import OpenAI
 from role_init import run_pipeline
@@ -100,9 +100,11 @@ class SubTask():
             speaking_rate=speaking_rate
         ))
     
-    def construct_response(self, is_last_round, current_agent: OpenAIAgent, most_recent_responses):
-        prefix_string = "你所在的子任务小组目前正在讨论任务的实施方案，你现在在和其他团队成员积极讨论。请尽己所能给出有价值的观点和创新性的想法。"
-        if len(most_recent_responses) == 0:
+    def construct_response(self, is_last_round, is_first_round, current_agent: OpenAIAgent, most_recent_responses, optimized_design: None):
+        prefix_string = "你所在的子任务小组目前正在讨论任务的实施方案，你现在在和其他团队成员积极讨论。请尽己所能给出有价值的观点和创新性的想法。\n"
+        if is_first_round:
+            if optimized_design is not None:
+                prefix_string += f"\n以下是一个较优的方案，请你在此方案基础上，展开你的优化。\n较优方案{optimized_design}"
             return prefix_string
         prefix_string += "\n以下是来自其他团队成员的设计:\n"
         recommend_list = []
@@ -110,6 +112,7 @@ class SubTask():
         query = ""
         query_retrieved = ""
         query_prompt = ""
+        current_design = {}
         for agent_role, responses in most_recent_responses.items():
             content = OpenAIAgent.extract_json(responses[-1]["content"])
             if agent_role != current_agent.agent_role:
@@ -122,6 +125,9 @@ class SubTask():
                 prefix_string += f"团队成员 {agent_role} 的设计: {design}\n"
             else:
                 query = content.get("检索内容", self.task_name)
+                current_design = content.get("设计", {})
+        if is_last_round:
+            prefix_string += f"团队成员(你) {current_agent.agent_role} 的设计: {current_design}\n"
         if len(query) > 0:
             context = current_agent.construct_user_message(f"请根据以下内容进行检索: {query}")
             query_retrieved = current_agent.generate_answer(context)
@@ -176,15 +182,17 @@ class SubTask():
         """
         chat_history = {agent.agent_role: [] for agent in self.agent_roles}
         most_recent_responses = {}
-        for r in range(rounds):
-            is_last = (r == rounds - 1)
+        for r in range(rounds + 1):
+            is_last = (r == rounds)
             is_first = r == 0
             round_responses = {agent.agent_role: [] for agent in self.agent_roles}
             for agent in self.agent_roles:
                 response_from_others = self.construct_response(
                     is_last_round=is_last,
+                    is_first=is_first,
                     current_agent=agent,
-                    most_recent_responses=most_recent_responses
+                    most_recent_responses=most_recent_responses,
+                    optimized_design=response_from_other_subtasks
                 )
                 # build per-agent prompt
                 prompt = agent.self_prompt + higher_prompt + self.prompt + agent.agent_role_prompt + response_from_others
@@ -205,8 +213,16 @@ class SubTask():
                 logging.error(f"Error parsing JSON from {agent.agent_role}: {e}")
                 continue
             for component, result in final_vote.items():
-                chosen = result.get("设计选择")
+                try:
+                    chosen = result.get("设计选择")
+                except Exception as e:
+                    logging.error(f"Error parsing JSON from {agent.agent_role}: {e}")
+                    continue
                 if not chosen:
+                    continue
+                if isinstance(chosen, list):
+                    chosen = chosen[0]
+                if not isinstance(chosen, str):
                     continue
                 vote_counts.setdefault(component, {})
                 vote_counts[component][chosen] = vote_counts[component].get(chosen, 0) + 1
@@ -219,7 +235,7 @@ class SubTask():
                 "设计选择": best_candidates,
                 "票数": max_votes,
             }
-        best_designs = {}
+        best_designs: Dict[str, Union[Dict, List[Dict]]] = {}
         for component, info in best_answers.items():
             best_roles = info["设计选择"]
             design_details = []
@@ -238,6 +254,8 @@ class SubTask():
                         except Exception as e:
                             logging.error(f"Error extracting detailed design from agent {agent.agent_role}: {e}")
                         break
+            if len(design_details) == 1:
+                design_details = design_details[0]
             best_designs[component] = design_details
         return chat_history, best_designs
 
@@ -245,6 +263,14 @@ class TotalTask:
     def __init__(self, task_text: str, model_name: str):
         # 1) run the pipeline to get structured task, subtasks and roles
         task_json, subtasks, roles_by_subtask = run_pipeline(task_text)
+        self.agent = OpenAIAgent(
+            model_name="qwen-plus-2025-04-28",
+            agent_role=None,
+            agent_speciality=None,
+            agent_subtask=None,
+            agent_role_prompt=None,
+            speaking_rate=1.0,
+        )
         self.task_info = task_json
         self.task_bg = task_json.get("任务背景", "")
         self.task_core_goal = task_json.get("核心需求", "")
@@ -255,8 +281,9 @@ class TotalTask:
             .replace("{task_core_goal}", self.task_core_goal) \
             .replace("{task_additional}", str(self.task_additional)) \
             .replace("{task_bg}", self.task_bg)
-        self.subtasks = []
+        self.subtasks: List[SubTask] = []
         # 2) for each subtask, init SubTask and its agents
+        self.sub_task_prompt = ""
         for sub in subtasks:
             name = sub.get("任务名称", "")
             core_goal = sub.get("核心目标", "")
@@ -271,6 +298,7 @@ class TotalTask:
                     agent_role_prompt=prompts["agent_task"]
                 )
             self.subtasks.append(st)
+        self.sub_task_prompt = ", ".join([_.task_name for _ in subtasks])
 
     def __str__(self):
         return f"TotalTask with {len(self.subtasks)} subtasks"
@@ -305,16 +333,44 @@ class TotalTask:
                 pickle.dump(data, f)
         else:
             raise ValueError(f"Unsupported format: {fmt}")
+    
+    def fetch_best_answer(self, generation: Dict, subtask_designs: Dict):
+        best_design_ch = generation["最佳设计组合"]
+        combest_design: Dict[str, Dict] = {}
+        for component, info in best_design_ch.items():
+            subtask_choice = info["设计选择"]
+            try:
+                design = subtask_designs.get(subtask_choice).get(component)
+                combest_design[component] = design
+            except Exception as e:
+                print(f"Fetch best answer error: {e}")
+        return combest_design
 
-    def run_all(self, rounds: int):
+    def run_all(self, iters: int, rounds: int):
         """
         Run debate for each subtask and return a mapping:
           { subtask_name: chat_history }
         """
-        results = {}
-        for st in self.subtasks:
-            history = st.run(rounds, self.prompt)
-            results[st.task_name] = history
+        for i in range(iters):
+            response_from_other_subtasks = ""
+            results = {}
+            designs = {}
+            for st in self.subtasks:
+                history, best_design = st.run(rounds, self.prompt, None if i == 0 else response_from_other_subtasks)
+                
+                results[st.task_name] = history
+                designs[st.task_name] = best_design
+                response_from_other_subtasks += f"\n子任务小组 {st.task_name} : {best_design}\n"
+            head_agent_subtask_prompt = prompts["head_agent_subtask"].replace("{subtasks}", self.sub_task_prompt)
+            head_agent_task = prompts["head_agent_task"].replace("{discussion_results}", response_from_other_subtasks)
+            prompt = prompts["head_agent_role"] + self.prompt + head_agent_subtask_prompt + head_agent_task
+            context = self.agent.construct_user_message(prompt)
+            generation = OpenAIAgent.extract_json(self.agent.generate_answer(context))
+            # get the best answer from all subtasks returns
+            total_best_answer = self.fetch_best_answer(generation=generation, subtask_designs=designs)
+
+            response_from_other_subtasks = str(total_best_answer)
+
         return results
 
 if __name__ == "__main__":
@@ -331,7 +387,6 @@ if __name__ == "__main__":
         fmt="pickle"
     )
     # 运行辩论
-    debate_results = total.run_all(rounds=4)
+    debate_results = total.run_all(iters=1, rounds=2)
     print(debate_results)
     # 保存结构化初始化结果
-
