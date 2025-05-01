@@ -1,7 +1,8 @@
 from typing import Dict, Any, List
 import os
 import json
-from prompt import prompts                 # your prompt definitions from prompt.py
+from prompt import prompts as prompts_meta                # your prompt definitions from prompt.py
+from prompt_baseline import prompts as prompts_baseline  # your prompt definitions from prompt_baseline.py
 from openai import OpenAI      # or whatever LLM client you use
 
 
@@ -22,12 +23,21 @@ def call_llm(prompt: str) -> str:
     return result
 
 # 2. Pipeline orchestration
-def run_pipeline(question: str):
+def run_pipeline(question: str, is_baseline: bool = False) -> Dict[str, Any]:
+    if is_baseline:
+        prompts = prompts_baseline
+    else:
+        prompts = prompts_meta
     # a. Task rewrite → structured
     rewrite_prompt = prompts["task_rewrite"].replace("{question}", question)
     structured = call_llm(rewrite_prompt)
     task_json = json.loads(structured)
 
+    if is_baseline:
+        role_prompt = prompts["role_generation"].replace("{question_overall}", json.dumps(task_json, ensure_ascii=False))
+        ret = call_llm(role_prompt)
+        roles = json.loads(ret)
+        return task_json, None, {"baseline": roles}
     # b. Split into subtasks
     split_prompt = prompts["subtask_split"].replace("{question}", json.dumps(task_json, ensure_ascii=False))
     subtasks = json.loads(call_llm(split_prompt))
@@ -48,6 +58,6 @@ def run_pipeline(question: str):
 
 # 3. CLI entrypoint
 if __name__ == "__main__":
-    import sys
+    roles = run_pipeline(task, is_baseline=False)
     roles = run_pipeline(task)
     print(json.dumps(roles, ensure_ascii=False, indent=2))

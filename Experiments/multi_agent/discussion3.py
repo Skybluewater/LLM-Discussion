@@ -1,7 +1,7 @@
 import json
 import os
 import logging
-import subprocess
+import argparse
 import copy
 import time
 import pickle
@@ -13,7 +13,19 @@ from typing import Dict, Any, List, Union
 from openai import OpenAI
 from role_init import run_pipeline
 from prompt import prompts
+from prompt_baseline import prompts as prompts_baseline
+
+argparser = argparse.ArgumentParser(description="Run multi-agent discussion")
+argparser.add_argument("--is_baseline", type=bool, help="Use baseline methods")
+args = argparser.parse_args()
+
+is_baseline = args.is_baseline
+if is_baseline:
+    prompts = prompts_baseline
+    
+org_task_text = "以大熊猫为主题为成都2025世界运动会设计一开场节目"
 sub_task_to_dps = ""
+
 class Agent:
     def generate_answer(self, answer_context):
         raise NotImplementedError("This method should be implemented by subclasses.")
@@ -62,8 +74,8 @@ class OpenAIAgent(Agent):
 
     @staticmethod
     def extract_json(str):
+        # Attempt to parse the string as JSON
         try:
-            # Attempt to parse the string as JSON
             str = str.replace("'", "").replace("json", "").replace("：", ":").replace("，", ",").replace("`", "")
             pattern = re.compile(r'(\{.*\})', re.DOTALL)
             match = pattern.search(str)
@@ -72,18 +84,26 @@ class OpenAIAgent(Agent):
                 json_data = json.loads(filtered)
             return json_data
         except json.JSONDecodeError:
-            # If parsing fails, return None or handle the error as needed
             logging.error(f"Failed to parse JSON: {str}")
             return None
 
 class SubTask():
-    def __init__(self, task_name, core_goal):
+    def __init__(self, task_name, core_goal, agents, model_name="qwen-plus-2025-04-28"):
         self.task_name = task_name
         self.core_goal = core_goal
-        self.prompt = prompts['subtask_prompt'] \
+        self.subtask_prompt = "" if is_baseline else prompts['subtask_prompt'] \
             .replace("{task_name}", self.task_name) \
             .replace("{core_goal}", self.core_goal)
         self.agent_roles: List[OpenAIAgent] = []
+        for agent in agents:
+            self.init_agent(
+                model_name=model_name,
+                agent_role=agent.get("角色名称"),
+                agent_speciality=agent.get("专业特点"),
+                agent_subtask=agent.get("工作职责"),
+                speaking_rate=agent.get("speaking_rate", 1.0),
+                agent_role_prompt=prompts["agent_task"]
+            )
 
     def __str__(self):
         return f"SubTask({self.task_name}, {self.core_goal})"
@@ -97,7 +117,6 @@ class SubTask():
             agent_role=agent_role,
             agent_subtask=agent_subtask,
             agent_speciality=agent_speciality,
-            # subtask=agent_subtask,
             agent_role_prompt=agent_role_prompt,
             speaking_rate=speaking_rate
         ))
@@ -111,10 +130,7 @@ class SubTask():
         prefix_string += "\n以下是来自其他团队成员的设计:\n"
         recommend_list = []
         recommend_prompt = ""
-        query = ""
-        query_retrieved = ""
-        query_prompt = ""
-        current_design = {}
+        query, query_retrieved, query_prompt, current_design = "", "", "", {}
         most_recent_responses = copy.deepcopy(most_recent_responses)
         for agent_role, responses in most_recent_responses.items():
             content = OpenAIAgent.extract_json(responses[-1]["content"])
@@ -128,10 +144,14 @@ class SubTask():
                         if key == "个人建议":
                             recommend_list.append(f"来自 {agent_role} 在设计上的建议：\n 建议: {value["意见"]}\n 原因: {value["原因"]}\n")
                         elif key.split("-")[0].strip() == current_agent.agent_role:
-                            recommend_list.append(f"来自 {agent_role} 对你在 {key.split("-")[1].strip()} 设计上的建议：\n 建议: {value["意见"]}\n 原因: {value["原因"]}\n")
+                            splits = key.split("-")
+                            if len(splits) > 1:
+                                recommend_list.append(f"来自 {agent_role} 对你在 {key.split("-")[1].strip()} 设计上的建议：\n 建议: {value["意见"]}\n 原因: {value["原因"]}\n")
+                            else:
+                                recommend_list.append(f"来自 {agent_role} 对你的建议：\n 建议: {value["意见"]}\n 原因: {value["原因"]}\n")
                 prefix_string += f"团队成员 {agent_role} 的设计: {design}\n"
             else:
-                query = content.get("检索内容", self.task_name)
+                query = content.get("检索内容", "")
                 current_design = content.get("设计", {})
         if is_last_round:
             prefix_string += f"团队成员(你) {current_agent.agent_role} 的设计: {current_design}\n"
@@ -146,37 +166,11 @@ class SubTask():
             prefix_string += f"\n同时对于你刚才的提问 {query}, 以下是来自知识库的检索结果:\n{query_retrieved}\n 希望对你充分理解任务需求并设计出最优的方案有所帮助。\n"
             query_prompt = "以及你从知识库检索获得的相关内容"
         if not is_last_round:
-            prefix_string += f"""
-根据以上内容，请你结合他人设计中的亮点{recommend_prompt}{query_prompt}，优化你的观点。
-同时请从你的专业角度对其他人的观点选择支持、反对或提出不同的看法，并用简短明确的语言指出其他团队成员观点中的不足之处或可改进的地方。
-
-请注意保持讨论过程的建设性，讨论应该激烈，以更好激发大家的创造力，同时在针对其他人的观点时请在开头部分明确指出提出这个观点的对象，以提升讨论的针对性。
-并确保用上文中提到的Json格式输出你的观点。并保证输出的完整性。请在讨论中保持礼貌。
-"""
+            prefix_string += prompts["agent_debate"] \
+                .replace("{recommend_prompt}", recommend_prompt) \
+                .replace("{query_prompt}", query_prompt)
         if is_last_round:
-            prefix_string += """
-你们的讨论时间即将结束，请根据以上内容，从包括你的设计在内的所有人的设计中，请组合选择出你认为最优的一套方案，并给出你的简要选择理由。
-
-你的输出格式应如下 Json 格式所示。请确保你的输出符合该Json格式，并且没有多余的尾随逗号，也不要有额外的换行。同时请务必确保Json的key-value周边的英文引号存在，且在Json外不要添加任何其他信息。
-输出格式：
-{
-    "演员元素": {
-        "设计选择": "你认为最优的团队成员名称(如舞蹈专家,当你选择自身设计时,给出你的角色名称)",
-        "选择理由": "你的简短选择理由"
-    },
-    "舞台元素": {
-        "设计选择": "...",
-        "选择理由": "..."
-    },
-    "灯光元素": {
-        "设计选择": "...",
-        "选择理由": "..."
-    },
-    "道具元素": {
-        "设计选择": "...",
-        "选择理由": "..."
-    }
-}"""
+            prefix_string += prompts["agent_conv"]
         return prefix_string
 
     def run(self, rounds: int, higher_prompt: str, response_from_other_subtasks = None):
@@ -201,7 +195,10 @@ class SubTask():
                     optimized_design=response_from_other_subtasks
                 )
                 # build per-agent prompt
-                prompt = agent.self_prompt + higher_prompt + self.prompt + agent.agent_role_prompt + response_from_others
+                if is_baseline:
+                    prompt = agent.self_prompt + higher_prompt + agent.agent_role_prompt + response_from_others
+                else:
+                    prompt = agent.self_prompt + higher_prompt + self.subtask_prompt + agent.agent_role_prompt + response_from_others
                 user_msg = agent.construct_user_message(prompt)
                 chat_history[agent.agent_role].append(user_msg)
                 response = agent.generate_answer(chat_history[agent.agent_role])
@@ -254,21 +251,18 @@ class SubTask():
             for best_role in best_roles:
                 for agent in self.agent_roles:
                     if agent.agent_role == best_role:
-                        final_content = OpenAIAgent.extract_json(most_recent_responses[agent.agent_role][-3]["content"].replace("'", "\""))
+                        final_content = OpenAIAgent.extract_json(most_recent_responses[agent.agent_role][-3]["content"])
+                        # Try to fetch a detailed design field; fallback to the entire component design if not specified.
                         try:
-                            # Try to fetch a detailed design field; fallback to the entire component design if not specified.
                             design_detail = final_content.get("设计").get(component)
-                            # If design_detail is a dict, further extract component details if available.
-                            if isinstance(design_detail, dict): # and component in design_detail:
+                            if isinstance(design_detail, dict):
                                 design_details.append(design_detail)
-                            # Fetch the design detail succesfully
                         except Exception as e:
                             logging.error(f"Error extracting detailed design from agent {agent.agent_role}: {e}")
                         break
             if len(design_details) == 1:
                 design_details = design_details[0]
             elif len(design_details) > 2:
-                # design_details = design_details[:2]
                 design_details = design_details[0]
             best_designs[component] = design_details
         print(f"Best designs for {self.task_name}: {best_designs}")
@@ -277,9 +271,9 @@ class SubTask():
 class TotalTask:
     def __init__(self, task_text: str, model_name: str):
         # 1) run the pipeline to get structured task, subtasks and roles
-        task_json, subtasks, roles_by_subtask = run_pipeline(task_text)
+        task_json, subtasks, roles_by_subtask = run_pipeline(task_text, is_baseline=is_baseline)
         self.agent = OpenAIAgent(
-            model_name="qwen2.5-vl-32b-instruct",
+            model_name="qwen-plus-2025-04-28",
             agent_role="大统领",
             agent_speciality="狠狠压榨",
             agent_subtask="管喽喽",
@@ -296,24 +290,20 @@ class TotalTask:
             .replace("{task_core_goal}", self.task_core_goal) \
             .replace("{task_additional}", str(self.task_additional)) \
             .replace("{task_bg}", self.task_bg)
-        self.subtasks: List[SubTask] = []
+        
+        # If is baseline, there are no subtasks but roles, init subtask as empty dictionary
+        if is_baseline:
+            subtasks = [{"--foo": "--bar"}]
+        
         # 2) for each subtask, init SubTask and its agents
+        self.subtasks: List[SubTask] = []
         self.sub_task_prompt = ""
         for sub in subtasks:
-            name = sub.get("任务名称", "")
-            core_goal = sub.get("核心目标", "")
-            st = SubTask(name, core_goal)
-            for role in roles_by_subtask.get(name, []):
-                st.init_agent(
-                    model_name=model_name,
-                    agent_role=role.get("角色名称"),
-                    agent_speciality=role.get("专业特点"),
-                    agent_subtask=role.get("工作职责"),
-                    speaking_rate=role.get("speaking_rate", 1.0),
-                    agent_role_prompt=prompts["agent_task"]
-                )
+            name = sub.get("任务名称", "baseline")
+            core_goal = sub.get("核心目标", "baseline")
+            st = SubTask(name, core_goal, roles_by_subtask.get(name, []), model_name=model_name)
             self.subtasks.append(st)
-        self.sub_task_prompt = ", ".join([_["任务名称"] for _ in subtasks])
+        self.sub_task_prompt = ", ".join([_.get("任务名称", "") for _ in subtasks])
 
     def __str__(self):
         return f"TotalTask with {len(self.subtasks)} subtasks"
@@ -371,10 +361,8 @@ class TotalTask:
         final_best_design = {}
         for i in range(iters):
             response_from_other_subtasks = ""
-            results = {}
-            designs = {}
-            global sub_task_to_dps
-            sub_task_to_dps = self.subtasks[0].task_name
+            results, designs = {}, {}
+
             with concurrent.futures.ThreadPoolExecutor(max_workers=len(self.subtasks)) as executor:
                 future_to_subtask = {
                     executor.submit(
@@ -391,11 +379,16 @@ class TotalTask:
                     designs[task_name] = best_design
                     response_from_other_subtasks += f"\n子任务小组 {task_name} : {best_design}\n"
             
+            if is_baseline:
+                break
+            
+            # 2) Remix & Review
             head_agent_subtask_prompt = prompts["head_agent_subtask"].replace("{subtasks}", self.sub_task_prompt)
             head_agent_task = prompts["head_agent_task"].replace("{discussion_results}", response_from_other_subtasks)
             prompt = prompts["head_agent_role"] + self.prompt + head_agent_subtask_prompt + head_agent_task
             context = [self.agent.construct_user_message(prompt)]
             generation = OpenAIAgent.extract_json(self.agent.generate_answer(context))
+            print(f"Iteration {i + 1} best choice reason: {generation}")
             # get the best answer from all subtasks returns
             total_best_answer = self.fetch_best_answer(generation=generation, subtask_designs=designs)
             response_from_other_subtasks = str(total_best_answer)
@@ -405,17 +398,19 @@ class TotalTask:
 
         return results, final_best_design
 
+
 if __name__ == "__main__":
     total = TotalTask(
-        task_text="以大熊猫为主题为成都2025世界运动会设计一开场节目",
+        task_text=org_task_text,
         model_name="qwen-plus-2025-04-28"#"qwen2.5-vl-32b-instruct"#"qwen-plus-2025-04-28"#"qwen3-30b-a3b"#"qwen2.5-14b-instruct-1m"#"qwen-turbo-2025-04-28",#,#"","
     )
     total.save_structured(
-        "total_task.json",
+        f"total_task_{org_task_text[:10]}_{is_baseline}.json",
         fmt="json"
     )
+    sub_task_to_dps = total.subtasks[0].task_name
     debate_results, best_design = total.run_all(iters=3, rounds=3)
-    with open("debate_results_panda.pkl", "wb") as f:
+    with open(f"debate_results_{org_task_text[:10]}_{is_baseline}.pkl", "wb") as f:
         pickle.dump(debate_results, f)
-    with open("best_design_panda.pkl", "wb") as f:
+    with open(f"best_design_{org_task_text[:10]}_{is_baseline}.pkl", "wb") as f:
         pickle.dump(best_design, f)
