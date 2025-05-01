@@ -2,7 +2,6 @@ import json
 import os
 import logging
 import argparse
-import copy
 import time
 import pickle
 import re
@@ -22,7 +21,7 @@ args = argparser.parse_args()
 is_baseline = args.is_baseline
 if is_baseline:
     prompts = prompts_baseline
-    
+iters, rounds = 3, 1
 org_task_text = "以大熊猫为主题为成都2025世界运动会设计一开场节目"
 sub_task_to_dps = ""
 
@@ -121,7 +120,7 @@ class SubTask():
             speaking_rate=speaking_rate
         ))
     
-    def construct_response(self, current_agent: OpenAIAgent, is_first_round, is_last_round, most_recent_responses, optimized_design: None):
+    def construct_response(self, current_agent: OpenAIAgent, is_first_round, is_last_round, recent_responses, optimized_design: None):
         prefix_string = "你所在的子任务小组目前正在讨论任务的实施方案，你现在在和其他团队成员积极讨论。请尽己所能给出有价值的观点和创新性的想法。\n"
         if is_first_round:
             if optimized_design is not None:
@@ -131,9 +130,10 @@ class SubTask():
         recommend_list = []
         recommend_prompt = ""
         query, query_retrieved, query_prompt, current_design = "", "", "", {}
-        most_recent_responses = copy.deepcopy(most_recent_responses)
-        for agent_role, responses in most_recent_responses.items():
-            content = OpenAIAgent.extract_json(responses[-1]["content"])
+
+        # Get the corresponding designs from other agents
+        for agent_role, responses in recent_responses.items():
+            content = OpenAIAgent.extract_json(responses["content"])
             if content is None:
                 continue
             if agent_role != current_agent.agent_role:
@@ -191,7 +191,7 @@ class SubTask():
                     current_agent=agent,
                     is_first_round=is_first,
                     is_last_round=is_last,
-                    most_recent_responses=most_recent_responses,
+                    recent_responses=most_recent_responses,
                     optimized_design=response_from_other_subtasks
                 )
                 # build per-agent prompt
@@ -206,14 +206,14 @@ class SubTask():
                     print(f"Agent {agent.agent_role} response: {response}...")
                 assistant_msg = agent.construct_assistant_message(response)
                 chat_history[agent.agent_role].append(assistant_msg)
-                round_responses[agent.agent_role] = chat_history[agent.agent_role]
+                round_responses[agent.agent_role] = chat_history[agent.agent_role][-1]
             most_recent_responses = round_responses
+        
         # After debate rounds, aggregate votes from final responses
         vote_counts = {}
         for agent in self.agent_roles:
-            final_msg = most_recent_responses[agent.agent_role][-1]["content"]
             try:
-                final_vote = OpenAIAgent.extract_json(final_msg)
+                final_vote = OpenAIAgent.extract_json(most_recent_responses[agent.agent_role]["content"])
             except Exception as e:
                 logging.error(f"Error parsing JSON from {agent.agent_role}: {e}")
                 continue
@@ -251,7 +251,7 @@ class SubTask():
             for best_role in best_roles:
                 for agent in self.agent_roles:
                     if agent.agent_role == best_role:
-                        final_content = OpenAIAgent.extract_json(most_recent_responses[agent.agent_role][-3]["content"])
+                        final_content = OpenAIAgent.extract_json(chat_history[agent.agent_role][-3]["content"])
                         # Try to fetch a detailed design field; fallback to the entire component design if not specified.
                         try:
                             design_detail = final_content.get("设计").get(component)
@@ -260,9 +260,9 @@ class SubTask():
                         except Exception as e:
                             logging.error(f"Error extracting detailed design from agent {agent.agent_role}: {e}")
                         break
-            if len(design_details) == 1:
-                design_details = design_details[0]
-            elif len(design_details) > 2:
+            if len(design_details) == 0:
+                design_details = OpenAIAgent.extract_json(chat_history[self.agent_roles[0].agent_role][-3]["content"]).get("设计").get(component)
+            elif len(design_details) >= 1:
                 design_details = design_details[0]
             best_designs[component] = design_details
         print(f"Best designs for {self.task_name}: {best_designs}")
@@ -409,8 +409,8 @@ if __name__ == "__main__":
         fmt="json"
     )
     sub_task_to_dps = total.subtasks[0].task_name
-    debate_results, best_design = total.run_all(iters=3, rounds=3)
-    with open(f"debate_results_{org_task_text[:10]}_{is_baseline}.pkl", "wb") as f:
+    debate_results, best_design = total.run_all(iters=iters, rounds=rounds)
+    with open(f"debate_results_{org_task_text[:10]}_{is_baseline}_{iters}_{rounds}.pkl", "wb") as f:
         pickle.dump(debate_results, f)
-    with open(f"best_design_{org_task_text[:10]}_{is_baseline}.pkl", "wb") as f:
+    with open(f"best_design_{org_task_text[:10]}_{is_baseline}_{iters}_{rounds}.pkl", "wb") as f:
         pickle.dump(best_design, f)
